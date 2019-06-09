@@ -1,0 +1,42 @@
+#!/bin/bash
+
+set -x
+
+CLUSTER_NAME=${CLUSTER_NAME:-rhcstest}
+HACLUSTER_PASSWORD=${HACLUSTER_PASSWORD:-testcluster123}
+
+# set hosts file
+grep -q 10.10.11.101 /etc/hosts || echo "10.10.11.101 rhcs01.example.lan rhcs01" >> /etc/hosts
+grep -q 10.10.11.102 /etc/hosts || echo "10.10.11.102 rhcs02.example.lan rhcs02" >> /etc/hosts
+grep -q 10.10.11.103 /etc/hosts || echo "10.10.11.103 rhcs03.example.lan rhcs03" >> /etc/hosts
+
+# detect CentOS version
+CENTOS_MAJOR_VERSION=$(rpm -q centos-release | cut -d- -f3)
+
+echo $CENTOS_MAJOR_VERSION
+
+if [[ $CENTOS_MAJOR_VERSION == 7 ]] ; then
+   sudo yum -y install epel-release
+   sudo yum -y install python-passlib
+   sudo yum -y install fence-agents-all
+   sudo yum -y install corosync pacemaker pcs 
+   sudo systemctl enable corosync pacemaker pcsd
+   sudo systemctl start pcsd
+
+   # set hacluster user password
+   if sudo grep -q '^hacluster:!!:' /etc/shadow ; then
+      HACLUSTER_SHADOW=$(python -c "from passlib.hash import sha512_crypt; import sys; print(sha512_crypt.encrypt(sys.argv[1]))" $HACLUSTER_PASSWORD)
+      sed -i "s|^hacluster:!!:|hacluster:${HACLUSTER_SHADOW}:|g" /etc/shadow
+   fi
+   if ! pcs cluster status > /dev/null; then
+      pcs property set stonith-enabled=false
+      pcs cluster stop --all
+      cp  /vagrant/scripts/corosync.conf /etc/corosync/corosync.conf
+      sed -i "s/REPLACE/10.10.11.10$(hostname | cut -d. -f1 | cut -d0 -f2)/g" /etc/corosync/corosync.conf
+      pcs cluster auth rhcs01.example.lan rhcs02.example.lan -u hacluster -p $HACLUSTER_PASSWORD
+      pcs cluster setup --start --name $CLUSTER_NAME
+      pcs cluster enable --all
+      pcs cluster start --all
+      pcs cluster status
+   fi
+fi
